@@ -523,6 +523,207 @@ This class uses the Template Method design pattern, requiring concrete subclasse
 
 
 
+## 0x04 IOC 
+
+### 整体流程
+
+#### 读 xml 配置文件
+
+FileSystemXmlApplicationContext 根据传入的 xml 配置文件，从 locations 里取出最后一个放入到 configLocation 里面，然后执行 refresh()
+
+将 从 locations 里取出最后一个放入到 configLocation 里面，然后执行 refresh()
+
+那么 locations 大于 1 呢，进行数组拷贝，然后 setParent。于是可以发现如果我传入多个 xml 配置文件，它们是不是每一个都要创建一个 createParentContext 的上下文，每一个山下文处理一个 xml 然后彼此之间形成了一条链。又由于 ApplicationContext 继承自 HierarchicalBeanFactory 只提供了 getParentBeanFactory，所以得出了子容器可以访问父容器，而父容器不可以访问子容器。
+
+```
+	public FileSystemXmlApplicationContext(String[] locations) throws ApplicationContextException, BeansException, IOException {
+		if (locations.length == 0) {
+			throw new ApplicationContextException("At least 1 config location required");
+		}
+
+		this.configLocation = locations[locations.length - 1];
+		logger.debug("Trying to open XML application context file '" + this.configLocation + "'");
+
+		// Recurse
+		if (locations.length > 1) {
+			// There were parent(s)
+			String[] parentLocations = new String[locations.length - 1];
+			System.arraycopy(locations, 0, parentLocations, 0, locations.length - 1);
+			if (logger.isDebugEnabled()) {
+				logger.debug("Setting parent context for locations: [" +
+										 StringUtils.arrayToDelimitedString(parentLocations, ","));
+			}
+			ApplicationContext parent = createParentContext(parentLocations);
+			setParent(parent);
+		}
+
+		// Initialize this context
+		refresh();
+	}
+```
+
+
+
+#### 调用 refresh 方法
+
+使用了模版方法设计模式，定义了容器刷新的整体算法。
+
+父类定义钩子函数， 子类只需要继承该类实现钩子即可，完成对该整体算法的接入 。
+
+
+
+##### refreshBeanFactory
+
+刷新 Bean 工厂，为什么要刷新？
+因为上下文的核心是工厂，而工厂用于创建 Bean 对象，创建 Bean 对象需要对象信息，而信息由 xml 提供，所以取 xml 工厂即可。。
+
+由于 Bean 信息是由 xml 提供的，所以我们看一下 AbstractXmlApplicationContext 的 refreshBeanFactory 方法
+
+```
+	protected void refreshBeanFactory() throws ApplicationContextException, BeansException {
+		String identifier = "application context [" + getDisplayName() + "]";
+		InputStream is = null;
+		try {
+			// Supports remote as well as local URLs
+			is = getInputStreamForBeanFactory();
+			this.xmlBeanFactory = new XmlBeanFactory(getParent());
+			this.xmlBeanFactory.setEntityResolver(new ResourceBaseEntityResolver(this));
+			this.xmlBeanFactory.loadBeanDefinitions(is);
+			if (logger.isInfoEnabled()) {
+				logger.info("BeanFactory for application context: " + this.xmlBeanFactory);
+			}
+		}
+	}
+```
+
+1. 获取到 xml 的文件输入流
+
+2. 创建 XmlBeanFactory
+
+   XmlBeanFactory 由于这个方法是 abstract 方法，我哪知道工厂是什么呢？不知道，因为只有子类知道我的工厂长什么样，由子类给我提供工厂本身。
+
+   它继承自 ListableBeanFactoryImpl 继承自 AbstractBeanFactory 继承自 ListableBeanFactory 继承自 AbstractBeanFactory 继承自 HierachicalBeanFactory，模版方法设计模式，继续对工厂 HierachicalBeanFactory 进行模版设计。
+
+   ListableBeanFactoryImpl 干了什么事？整合了 AbstractBeanFactory，ListableBeanFactory 的功能函数，提供了模版，而 XmlBeanFactory 继承它完成自有操作。
+
+3. 设置 xml 解析器
+
+   ```
+   ResourceBaseEntityResolver extends BeansDtdResolver
+   BeansDtdResolver implements EntityResolver
+   public interface EntityResolver   // org.xml.sax
+   ```
+
+   应用了 JDK 的 sax 流式解析器解析。
+
+4. 解析 xml 
+
+   loadBeanDefinitions
+
+   ```
+   	logger.info("Loading XmlBeanFactory from InputStream [" + is + "]");
+   	DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+   	logger.debug("Using JAXP implementation [" + factory + "]");
+   	factory.setValidating(true);
+   	DocumentBuilder db = factory.newDocumentBuilder();
+   	db.setErrorHandler(new BeansErrorHandler());
+   	db.setEntityResolver(this.entityResolver != null ? this.entityResolver : new BeansDtdResolver());
+   	Document doc = db.parse(is);
+   	loadBeanDefinitions(doc);
+   ```
+
+   标准的 JDK xml 解析器，于是发现了虽然应用了 sax 解析器，但是实际是使用了 Document 解析器进行解析。解析出来的 Bean 放入到了 AbstractBeanDefinition 类中。
+
+##### invokeContextConfigurers
+
+当我们将 BeanDefinition 实例化为对象时，能不能在做一点额外的配置工作呢？将 BeanDefinition 中对于工厂本身配置对象预先创建，然后回调其方法，让它们来对工厂进行进一步的配置工作。比如这里的回调配置在 XML 中的 BeanFactoryPostProcessor 对象，有时候我们需要在 Spring 创建 bean 对象之前，可编程的对 BeanFactory 进行操作。于是引入 BFPP 接口 。
+
+```
+	private void invokeContextConfigurers() {
+		String[] beanNames = getBeanDefinitionNames(BeanFactoryPostProcessor.class);
+		for (int i = 0; i < beanNames.length; i++) {
+			String beanName = beanNames[i];
+			BeanFactoryPostProcessor configurer = (BeanFactoryPostProcessor) getBean(beanName);
+			configurer.postProcessBeanFactory(getBeanFactory());
+		}
+	}
+```
+
+此时，我就可以在里面写一个自己的类实现 BeanFactoryPostProcessor，然后注册到容器里面，它就会自己回调，就可以对工厂进行 CRUD 操作了。
+
+##### loadOptions
+
+加载上下文的配置项，从配置文件里面，取出名字为 contextOptions 的对象，保存即可。如果没有的话使用默认的上下文配置，是否支持可重加载默认为 true，此类为 public 说明可以继承重写。
+
+##### initMessageSource
+
+提供消息本地化，使用 JDK 的 Locale 本地化消息对象，本地接收原始 code 然后根据本地化的语言（中文、英文）将对应的字符串返回。从配置文件里面，取出名字为 messageSource 的对象，若没有使用默认的。
+
+##### onRefresh
+
+模版方法设计模式，钩子函数，默认为空。
+
+##### refreshListeners
+
+使用观察者模式，初始化应用监听器。
+
+##### preInstantiateSingletons
+
+实例化单例 Bean
+
+##### publishEvent
+
+发布容器刷新成功事件， 观察者接收到事件后完成自己的动作，该动作与容器解耦 。
+
+
+
+总结：
+
+将存放 Bean 信息的 xml 配置文件，解析 BeanFactory 实例到 BeanDifinition 池里，并且提前实例化特定的 Bean 定义： BFPP 对象（回调方法，配置工厂） 、MessageSource 对象（保存对象）、事件监听器对象（保存对象到 ApplicationEventMulticaster）。
+
+![Spring1304](Spring1.0.assets/Spring1304.png)
+
+如何提前实例化特殊对象？
+
+```
+	private Object getBeanInternal(String name, Map newlyCreatedBeans) {
+		if (name == null)
+			throw new NoSuchBeanDefinitionException(null, "Cannot get bean with null name");
+		try {
+			AbstractBeanDefinition bd = getBeanDefinition(transformedBeanName(name));
+			if (bd.isSingleton()) {
+				// Check for bean instance created in the current call,
+				// to be able to resolve circular references
+				if (newlyCreatedBeans != null && newlyCreatedBeans.containsKey(name)) {
+					return newlyCreatedBeans.get(name);
+				}
+				return getSharedInstance(name, newlyCreatedBeans);
+			}
+			else {
+				return createBean(name, newlyCreatedBeans);
+			}
+		}
+		catch (NoSuchBeanDefinitionException ex) {
+			// not found -> check parent
+			if (this.parentBeanFactory != null)
+				return this.parentBeanFactory.getBean(name);
+			throw ex;
+		}
+	}
+```
+
+
+
+1. 根据 name 获取到 BeanDefinition 
+
+2. 看是否为单例 Bean，如果是单例 Bean 就往里面看一下，为什么呢？因为单例 Bean 可以缓存啊，缓存用的是什么啊，享元模式（即对象池）。如果有呢，那么就从缓存中拿，如果没有呢，那就 getSharedInstance 。
+
+   根据是否为单例 bean，来选择创建或者尝试从缓存中取（享元模式-对象池）
+
+    
+
+
+
 
 
 
