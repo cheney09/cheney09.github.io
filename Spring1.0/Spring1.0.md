@@ -685,6 +685,8 @@ FileSystemXmlApplicationContext 根据传入的 xml 配置文件，从 locations
 
 如何提前实例化特殊对象？
 
+委托给 Bean 工厂
+
 ```
 	private Object getBeanInternal(String name, Map newlyCreatedBeans) {
 		if (name == null)
@@ -714,11 +716,59 @@ FileSystemXmlApplicationContext 根据传入的 xml 配置文件，从 locations
 
 
 
-1. 根据 name 获取到 BeanDefinition 
+1. 首先根据 name 获取到 BeanDefinition ，如果没有元定义信息还玩什么。
 
 2. 看是否为单例 Bean，如果是单例 Bean 就往里面看一下，为什么呢？因为单例 Bean 可以缓存啊，缓存用的是什么啊，享元模式（即对象池）。如果有呢，那么就从缓存中拿，如果没有呢，那就 getSharedInstance 。
 
    根据是否为单例 bean，来选择创建或者尝试从缓存中取（享元模式-对象池）
+
+3. `getSharedInstance` 方法中，从 singletonCache （用以缓存实例化的单例 Bean 对象）中拿出单例对象实例，如果为空则创建并放入缓存。
+
+   是否前缀是 &，又不是FactoryBean工厂则报错，实现该接口就可以表示这个父子关系。使用的是工厂模式，让用户自己定义Bean的生成过程，例如 FeignClientFactoryBean，也即通过接口自动生成类，就是这样做的。
+
+   如，写一个接口
+
+   ```
+   @xxx
+   interface test {
+       method1;
+       method2;
+   }
+   ```
+
+   如果想自动的做代理，就使用FactoryBean即可，扫描到这个接口，然后写一个类，比如jdk动态代理，生成出来之后注入即可。
+
+4.  处理 FactoryBean 或者 返回 bean 
+
+   ```
+   // Set pass-through properties
+   if (factory.getPropertyValues() != null) {
+   	logger.debug("Applying pass-through properties to bean with name '" + name + "'");
+   	new BeanWrapperImpl(beanInstance).setPropertyValues(factory.getPropertyValues());
+   }
+   ```
+
+   遍历 PropertyValue 往里面 setPropertyValue，什么意思？如果我有当前bean name的这些属性值，new BeanWrapperImpl 然后往里面set即可。
+
+5. 那么看下 怎么创建 Bean 的，`createBean`
+
+   处理 bean 的父子继承关系，得到最终的 bean 定义信息 getMergedBeanDefinition，通过name获取AbstractBeanDefinition，如果是root包装即可，如果是child则是bean套bean，也即如果有父子关系，那么就需要把父的定义从他那里继承过来。
+
+   
+
+   通过反射创建对象 
+
+   
+
+   缓存对象的元数据信息 
+
+   `cachedIntrospectionResults` 当前对象内省信息，即元数据信息。若为空则创建一个新的。为什么缓存，因为后续利用反射的时候就不需要调用jni重新去找了，直接从缓存拿来用就行
+
+   创建 `BeanWrapperImpl` 包装对象，也不是包装者模式，因为包装者模式需要包装器和包装对象同时实现同一个接口。包装了对象信息和元数据信息，因为需要操作对象，所以封装了对元数据信息的处理。
+
+   
+
+   
 
     
 
